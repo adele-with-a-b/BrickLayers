@@ -2013,7 +2013,7 @@ class BrickLayersProcessor:
                     buffer_lines.append(myline)
 
                 self.last_noninternalperimeter_state = current_state
-                if simulator.moved_in_xy:
+                if simulator.moved_in_xy and not feature.wiping:
                     myline.current = current_state
                     self.last_noninternalperimeter_xy_line = myline
 
