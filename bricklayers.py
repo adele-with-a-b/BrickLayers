@@ -1610,7 +1610,8 @@ class BrickLayersProcessor:
                             # If the gcode was using absolute extrusion, insert an M82 to return to Absolute Extrusion
                             buffer.append(from_gcode("M82 ; BRICK: Return to Absolute Extrusion\n"))
                             # Resets the correct absolute extrusion register for the next feature:
-                            buffer.append(from_gcode(f"G92 E{myline.previous.e} ; BRICK: Resets the Extruder absolute position\n"))
+                            e_reset = self.last_noninternalperimeter_state.e if self.last_noninternalperimeter_state else myline.previous.e
+                            buffer.append(from_gcode(f"G92 E{e_reset} ; BRICK: Resets the Extruder absolute position\n"))
                         ##########
 
                         if previous_perimeter != perimeter_index:
@@ -1937,7 +1938,8 @@ class BrickLayersProcessor:
                             # If the gcode was using absolute extrusion, insert an M82 to return to Absolute Extrusion
                             buffer_lines.append(from_gcode("M82 ; BRICK: Return to Absolute Extrusion\n"))
                             # Resets the correct absolute extrusion register for the next feature:
-                            buffer_lines.append(from_gcode(f"G92 E{myline.previous.e} ; BRICK: Resets the Extruder absolute position\n"))
+                            e_reset = self.last_noninternalperimeter_state.e if self.last_noninternalperimeter_state else myline.previous.e
+                            buffer_lines.append(from_gcode(f"G92 E{e_reset} ; BRICK: Resets the Extruder absolute position\n"))
                         self.last_internalperimeter_state = calculated_line.current
                         #if  myline.previous.width != kept_line.current.width:
                         buffer_lines.append(from_gcode(f"{simulator.const_width}{myline.previous.width}\n"))   # For the Preview
