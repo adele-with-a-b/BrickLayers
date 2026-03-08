@@ -72,15 +72,11 @@ __version__ = "v0.2.1-10-g6409588"  # Updated by GitHub Actions
 #
 # Repository:
 #  - https://github.com/GeekDetour/BrickLayers
-
-
 import traceback # On the very top
 
 # LOGGING:
 import logging
 logger = logging.getLogger(__name__)
-
-
 from typing import Dict
 class ObjectEntry:
     """Stores the Name of the objects being printed, as a lightweight single object reference"""
@@ -103,8 +99,6 @@ class ObjectEntry:
     def clear_registry(cls):
         """Clears all stored ObjectEntry instances from the registry."""
         cls._registry.clear()
-
-
 import math
 from typing import NamedTuple
 class Point(NamedTuple):
@@ -159,7 +153,58 @@ class Point(NamedTuple):
         new_y = to_pos.y + direction[1] * scale
         return Point(new_x, new_y)
 
+    @staticmethod
+    def arc_length(s_from, s_to, i_offset, j_offset, clockwise):
+        """Compute the arc path length for a G2/G3 move."""
+        cx = s_from.x + i_offset
+        cy = s_from.y + j_offset
+        r = math.sqrt(i_offset * i_offset + j_offset * j_offset)
+        if r < 1e-9:
+            return Point.distance_between_points(s_from, s_to)
+        a_start = math.atan2(s_from.y - cy, s_from.x - cx)
+        a_end = math.atan2(s_to.y - cy, s_to.x - cx)
+        if clockwise:
+            sweep = a_start - a_end
+            if sweep <= 0:
+                sweep += 2 * math.pi
+        else:
+            sweep = a_end - a_start
+            if sweep <= 0:
+                sweep += 2 * math.pi
+        return r * sweep
 
+    @staticmethod
+    def point_along_arc(s_from, i_offset, j_offset, clockwise, distance, total_arc_length):
+        """Find a point at `distance` along an arc from s_from."""
+        cx = s_from.x + i_offset
+        cy = s_from.y + j_offset
+        r = math.sqrt(i_offset * i_offset + j_offset * j_offset)
+        if r < 1e-9:
+            return Point(s_from.x, s_from.y)
+        a_start = math.atan2(s_from.y - cy, s_from.x - cx)
+        fraction = distance / total_arc_length if total_arc_length > 0 else 0
+        sweep_angle = total_arc_length / r
+        if clockwise:
+            a_target = a_start - fraction * sweep_angle
+        else:
+            a_target = a_start + fraction * sweep_angle
+        return Point(cx + r * math.cos(a_target), cy + r * math.sin(a_target))
+
+    @staticmethod
+    def parse_arc_ij(gcode_str):
+        """Extract I, J offsets from a G2/G3 gcode string. Returns (i, j) or None."""
+        parts = gcode_str.split()
+        if not parts or parts[0] not in ('G2', 'G3'):
+            return None
+        i_val, j_val = 0.0, 0.0
+        for p in parts[1:]:
+            if p[0] == 'I':
+                i_val = float(p[1:])
+            elif p[0] == 'J':
+                j_val = float(p[1:])
+        if i_val == 0.0 and j_val == 0.0:
+            return None
+        return (i_val, j_val, parts[0] == 'G2')
 class GCodeState(NamedTuple):
     """Printing State"""
     x: float
@@ -176,8 +221,6 @@ class GCodeState(NamedTuple):
     is_retracting: bool
     just_started_extruding: bool
     just_stopped_extruding: bool
-
-
 class GCodeFeatureState(NamedTuple):
     """Feature State"""
     layer: int
@@ -198,8 +241,6 @@ class GCodeFeatureState(NamedTuple):
     wipe_willfinish: bool
     wipe_justfinished: bool
     capture_height: bool
-
-
 class GCodeStateBBox:
     """Bounding-Box calculator to detect non-concentric loops.
     This implementation is highly efficient, using simple vertical and horizontal calculations 
@@ -227,6 +268,82 @@ class GCodeStateBBox:
             self.max_x = max(self.max_x, x)
             self.min_y = min(self.min_y, y)
             self.max_y = max(self.max_y, y)
+
+    def compute_arc(self, prev_state, cur_state, i_offset, j_offset, clockwise):
+        """Computes the bounding box of a G2/G3 arc and feeds it into this bbox.
+        
+        Args:
+            prev_state: start point (has .x, .y)
+            cur_state:  end point (has .x, .y)
+            i_offset:   I parameter (center X offset from start, relative)
+            j_offset:   J parameter (center Y offset from start, relative)
+            clockwise:  True for G2 (CW), False for G3 (CCW)
+        """
+        cx = prev_state.x + i_offset
+        cy = prev_state.y + j_offset
+
+        # Angles from center to start and end
+        a_start = math.atan2(prev_state.y - cy, prev_state.x - cx)
+        a_end   = math.atan2(cur_state.y  - cy, cur_state.x  - cx)
+        r = math.sqrt(i_offset * i_offset + j_offset * j_offset)
+
+        if r < 1e-9:
+            self.compute(cur_state)
+            return
+
+        # Normalize sweep: CW is negative, CCW is positive
+        if clockwise:
+            sweep = a_start - a_end
+            if sweep <= 0:
+                sweep += 2 * math.pi
+            sweep = -sweep  # negative for CW
+        else:
+            sweep = a_end - a_start
+            if sweep <= 0:
+                sweep += 2 * math.pi
+
+        # Collect candidate extreme points: start, end, plus any cardinal
+        # angles (0, pi/2, pi, 3pi/2) crossed during the sweep.
+        xs = [prev_state.x, cur_state.x]
+        ys = [prev_state.y, cur_state.y]
+
+        cardinals = [0.0, math.pi / 2, math.pi, -math.pi, -math.pi / 2]
+        for card in cardinals:
+            # Check if this cardinal angle is within the arc sweep
+            diff = card - a_start
+            # Normalize diff into the sweep direction
+            if clockwise:  # sweep is negative
+                while diff > 0:
+                    diff -= 2 * math.pi
+                while diff < -2 * math.pi:
+                    diff += 2 * math.pi
+                if diff >= sweep:  # sweep is negative, so >= means "within"
+                    xs.append(cx + r * math.cos(card))
+                    ys.append(cy + r * math.sin(card))
+            else:  # CCW, sweep is positive
+                while diff < 0:
+                    diff += 2 * math.pi
+                while diff > 2 * math.pi:
+                    diff -= 2 * math.pi
+                if diff <= sweep:
+                    xs.append(cx + r * math.cos(card))
+                    ys.append(cy + r * math.sin(card))
+
+        # Feed all extreme points into the bbox
+        for x in xs:
+            self.min_x = min(self.min_x, x)
+            self.max_x = max(self.max_x, x)
+        for y in ys:
+            self.min_y = min(self.min_y, y)
+            self.max_y = max(self.max_y, y)
+
+        # Ensure nonzero size on first use
+        if self.min_x == self.max_x:
+            self.min_x -= 0.1
+            self.max_x += 0.1
+        if self.min_y == self.max_y:
+            self.min_y -= 0.1
+            self.max_y += 0.1
 
     def contains(self, other) -> bool:
         """Checks if this bounding box fully contains another bounding box."""
@@ -264,8 +381,6 @@ class GCodeStateBBox:
         center_x, center_y = self.get_center()
         width, height = self.get_size()
         return f"GCodeStateBBox(center_x={center_x:.3f}, center_y={center_y:.3f}, width={width:.3f}, height={height:.3f})"
-
-
 from typing import Optional
 import re
 class GCodeLine:
@@ -303,10 +418,6 @@ class GCodeLine:
     def from_gcode(gcode: str, previous: Optional[GCodeState] = None, current: Optional[GCodeState] = None, object_ref: Optional[ObjectEntry] = None) -> "GCodeLine":
         """Creates a GCodeLine instance from a raw G-code line without modifications. That should inclute a \\n at the very end"""
         return GCodeLine(gcode, previous, current, object_ref)
-
-
-
-
 class GCodeFeature:
     """
     GCodeFeature: A state tracker for parsing G-code and identifying print features.
@@ -359,8 +470,6 @@ class GCodeFeature:
     const_layer_change   = None
     const_layer_height   = None
     const_layer_z        = None
-
-
     def __init__(self):
         self.layer = 0
         self.z = 0.0
@@ -380,8 +489,6 @@ class GCodeFeature:
         self.wipe_willfinish = False
         self.wipe_justfinished = True
         self.capture_height = True
-
-
     def parse_gcode_line(self, line):
         """
         Captures a Feature definition
@@ -404,8 +511,6 @@ class GCodeFeature:
             self.wiping = False
             self.wipe_justfinished = True
             self.wipe_willfinish = False
-
-
         # This fuction (so far) only checks things that start with ";SOMETHING"
         if line and line[0] != ";":
              return self # no point in proceed checking further
@@ -498,8 +603,6 @@ class GCodeFeature:
             self.external_perimeter = False # THIS IS TECHNICALLY WRONG! Sometimes OrcaSlicer just continues the previous Type on a new layer!
             self.layer += 1
             self.capture_height = True # I need to capture only once per layer.
-
-
         #elif line.startswith(";Z:"):
         elif strippedline.startswith(self.DEF_LAYER_ZS):
             for prefix in self.DEF_LAYER_ZS:
@@ -524,8 +627,6 @@ class GCodeFeature:
             self.last_type = self.current_type # Allows for feature change.
 
         return self
-
-
     def get_state(self):
         """Returns a dictionary representation of the feature state."""
         return GCodeFeatureState(
@@ -595,8 +696,6 @@ class GCodeSimulator:
 
         if initial_state:
             self.set_state(initial_state)
-
-
     def parse_gcode_line(self, rawline):
         stripline = rawline.strip()
         line = stripline
@@ -624,13 +723,9 @@ class GCodeSimulator:
                 self.is_extruding = False
                 self.is_retracting = False
                 self.just_stopped_extruding = False
-
-
                 # Movement commands
                 abs_pos = self.absolute_positioning
                 rel_ext = self.relative_extrusion
-
-
                 old_x, old_y, old_z, old_e = self.x, self.y, self.z, self.e
                 new_x, new_y, new_z = self.x, self.y, self.z
                 new_e, new_f = self.e, self.f
@@ -803,8 +898,6 @@ class GCodeSimulator:
         self.detraction_speed = 0
         self.retraction_length = 0
 
-
-
 class LoopNode:
     """Temporary structure to track nesting relationships of LOOPS during processing."""
     __slots__ = ('around_hole', 'depth', 'boundingbox', 'order', 'looplines', 'kids')
@@ -865,8 +958,6 @@ class LoopNode:
                 #f"looplines={brick_to_serializable(self.looplines, keys_to_include)}"
                 )
 
-
-
 def brick_dump(text, obj, keys_to_include=None):
     if not hasattr(brick_dump, "_json"):
         import json
@@ -903,8 +994,6 @@ def brick_to_serializable(obj, keys_to_include=None):
         return {key: brick_to_serializable(value, keys_to_include) for key, value in obj.items()}
     # Base case: return the object if it’s already serializable
     return obj
-
-
 
 from typing import Callable, Optional
 class BrickLayersProcessor:
@@ -985,8 +1074,6 @@ class BrickLayersProcessor:
                 "layercount": layercount,
                 "verbosity": self.verbosity
             })
-
-
     @staticmethod
     def new_line_from_multiplier(myline, extrusion_multiplier):
         # Calculates the Relative Extrusion based on the absolute extrusion values of the simulator
@@ -1092,8 +1179,6 @@ class BrickLayersProcessor:
             self.retracted = 0 # Cancel the Debt
 
         return gcodes
-
-
     def wipe(self, loop, simulator, feature):
         """
         Process a loop to generate a wiping path (repeating part of the already-printed loop while retracting).
@@ -1136,25 +1221,14 @@ class BrickLayersProcessor:
 
         for line in path:
             if line.current.is_extruding:
-                if wipe_mode == 'forward':
-                    from_pos = line.previous
-                    to_pos = line.current
-                else:  # backward mode
-                    from_pos = line.current
-                    to_pos = line.previous
-
-                segment_length = Point.distance_between_points(from_pos, to_pos)
+                from_pos, to_pos, segment_length, is_arc, arc_params = BrickLayersProcessor._wipe_segment_info(line, wipe_mode)
 
                 if segment_length <= 1e-6:
                     continue
 
                 if traveled + segment_length >= wipe_distance:
                     needed_distance = wipe_distance - traveled
-                    target_point = (
-                        Point.point_along_line_forward(from_pos, to_pos, needed_distance)
-                        if wipe_mode == 'forward'
-                        else Point.point_along_line_backward(from_pos, to_pos, needed_distance)
-                    )
+                    target_point = BrickLayersProcessor._wipe_interpolate(from_pos, to_pos, needed_distance, wipe_mode, is_arc, arc_params, segment_length)
 
                     moving_points.append(target_point)
                     moving_distances.append(needed_distance)
@@ -1190,9 +1264,46 @@ class BrickLayersProcessor:
         # TODO: Incorporate the experimental_arcflick 
 
         return gcodes
-
-
     # TODO: salvage `experimental_arcflick` into the new wipe feature and remove this:
+
+    @staticmethod
+    def _wipe_segment_info(line, wipe_mode):
+        """Compute segment length and arc info for a wipe path segment.
+        Returns (from_pos, to_pos, segment_length, is_arc, arc_params) where
+        arc_params is (i_val, j_val, clockwise) or None."""
+        if wipe_mode == 'forward':
+            from_pos = line.previous
+            to_pos = line.current
+        else:
+            from_pos = line.current
+            to_pos = line.previous
+
+        arc_info = Point.parse_arc_ij(line.gcode)
+        if arc_info and line.previous and line.current:
+            i_val, j_val, clockwise = arc_info
+            if wipe_mode == 'backward':
+                cx = line.previous.x + i_val
+                cy = line.previous.y + j_val
+                i_val = cx - line.current.x
+                j_val = cy - line.current.y
+                clockwise = not clockwise
+            seg_len = Point.arc_length(from_pos, to_pos, i_val, j_val, clockwise)
+            return from_pos, to_pos, seg_len, True, (i_val, j_val, clockwise)
+        else:
+            seg_len = Point.distance_between_points(from_pos, to_pos)
+            return from_pos, to_pos, seg_len, False, None
+
+    @staticmethod
+    def _wipe_interpolate(from_pos, to_pos, needed_distance, wipe_mode, is_arc, arc_params, segment_length):
+        """Find a point at needed_distance along a segment (line or arc)."""
+        if is_arc:
+            i_val, j_val, clockwise = arc_params
+            return Point.point_along_arc(from_pos, i_val, j_val, clockwise, needed_distance, segment_length)
+        elif wipe_mode == 'forward':
+            return Point.point_along_line_forward(from_pos, to_pos, needed_distance)
+        else:
+            return Point.point_along_line_backward(from_pos, to_pos, needed_distance)
+
     def wipe_movement(self, loop, target_state, simulator, feature, z = None):
         from_gcode = GCodeLine.from_gcode
 
@@ -1234,25 +1345,14 @@ class BrickLayersProcessor:
 
         for line in path:
             if line.current.is_extruding:
-                if wipe_mode == 'forward':
-                    from_pos = line.previous
-                    to_pos = line.current
-                else:  # backward mode
-                    from_pos = line.current
-                    to_pos = line.previous
-
-                segment_length = Point.distance_between_points(from_pos, to_pos)
+                from_pos, to_pos, segment_length, is_arc, arc_params = BrickLayersProcessor._wipe_segment_info(line, wipe_mode)
 
                 if segment_length <= 1e-6:
                     continue
 
                 if traveled + segment_length >= wipe_distance:
                     needed_distance = wipe_distance - traveled
-                    target_point = (
-                        Point.point_along_line_forward(from_pos, to_pos, needed_distance)
-                        if wipe_mode == 'forward'
-                        else Point.point_along_line_backward(from_pos, to_pos, needed_distance)
-                    )
+                    target_point = BrickLayersProcessor._wipe_interpolate(from_pos, to_pos, needed_distance, wipe_mode, is_arc, arc_params, segment_length)
 
                     moving_points.append(target_point)
                     moving_distances.append(needed_distance)
@@ -1265,8 +1365,6 @@ class BrickLayersProcessor:
 
                     traveled += segment_length
                     cur_pos = to_pos
-
-
             # Debug output (optional, but useful during development)
             logger.debug(f"Wipe: {len(moving_points)} points, {traveled:.3f}mm covered, {sum(moving_extrusions):.3f}mm retracted, distances: {moving_distances}, extrusions: {moving_extrusions}")
 
@@ -1295,8 +1393,6 @@ class BrickLayersProcessor:
                 P = start_pos
                 C = moving_points[-1]
             T = target_state
-
-
             I, J, arc_command = self.cleaning_flick_arc(C.x, C.y, T.x, T.y, 1.0)
             flick = f"{arc_command} Z{(z+zhop):.2f} I{I:.3f} J{J:.3f} ; Cleaning-Flick ARC\n" # ARC going UP
 
@@ -1330,8 +1426,6 @@ class BrickLayersProcessor:
             if z is not None:
                 gcodes.append(from_gcode(f"G1 Z{z:.2f} ; BRICK: Target Position\n"))
         return gcodes
-
-
     @staticmethod
     def cleaning_flick_arc(Cx, Cy, Tx, Ty, radius):
         """
@@ -1379,8 +1473,6 @@ class BrickLayersProcessor:
 
         return I, J, arc_command
         #return f"{arc_command} Z{Cz:.3f} I{I:.3f} J{J:.3f} ; Cleaning-Flick ARC\n"
-
-
     @staticmethod
     def calculate_loop_depth(group_perimeter):
         """Determines the hierarchical structure of perimeter loops in a layer.
@@ -1409,7 +1501,26 @@ class BrickLayersProcessor:
             bb = GCodeStateBBox()
             for pline in ploop:
                 if pline.current.is_extruding: # Only compute movements that are extruding, ignore wipes or travels
-                    bb.compute(pline.current)  # compute the bounding box that surrounds the current loop
+                    gcode = pline.gcode.strip()
+                    # Check for arc commands (G2/G3) and compute arc bounding box
+                    if pline.previous and gcode and gcode[:2] in ('G2', 'G3'):
+                        parts = gcode.split()
+                        cmd = parts[0]
+                        if cmd in ('G2', 'G3'):
+                            i_val, j_val = 0.0, 0.0
+                            for arg in parts[1:]:
+                                if arg[0] == 'I':
+                                    i_val = float(arg[1:])
+                                elif arg[0] == 'J':
+                                    j_val = float(arg[1:])
+                            if i_val != 0.0 or j_val != 0.0:
+                                bb.compute_arc(pline.previous, pline.current, i_val, j_val, cmd == 'G2')
+                            else:
+                                bb.compute(pline.current)
+                        else:
+                            bb.compute(pline.current)
+                    else:
+                        bb.compute(pline.current)  # compute the bounding box that surrounds the current loop
             # print(node)
             # print(bb)
             nodes.append(LoopNode(loop_index, bb, ploop))
@@ -1454,8 +1565,6 @@ class BrickLayersProcessor:
         del parents_merged
 
         return moving_order
-
-
     @staticmethod
     def build_loop_tree(nodes, hole=False):
         """Builds the parent-child tree structure based on bounding box containment."""
@@ -1498,8 +1607,6 @@ class BrickLayersProcessor:
         parents.append(previous_node)
 
         return parents  # Returning this for debugging or later use
-
-
 
     def generate_deffered_perimeters(self, myline, deffered, extrusion_multiplier, extrusion_multiplier_preview, feature, simulator, buffer):
         """Creates the new intermediate "Brick Layer" for the deffered perimeters on a higher Z, recalculating extrusions"""
@@ -1572,8 +1679,6 @@ class BrickLayersProcessor:
                         ##########
 
                         #logger.info(f"loop_order: {loop_order} previous_loop_order: {previous_loop_order} object: {current_object}\n")
-
-
                         if current_object is not deffered_line.object:
                             # Stops printing the previous object, begins the new one:
                             if current_object is not None:
@@ -1593,13 +1698,9 @@ class BrickLayersProcessor:
                                 buffer.extend(self.travel_to(deffered_line.previous, simulator, feature, None, deffered_line.previous, target_z))  
                             buffer.append(from_gcode(f"G1 F{int(deffered_line.previous.f)} ; BRICK: FeedRate\n"))
 
-
-
                         # Actually adding the internal perimeter line, with a recalculated extrusion:
                         calculated_line = BrickLayersProcessor.new_line_from_multiplier(deffered_line, extrusion_multiplier)
                         buffer.append(calculated_line) # Actual Insertion of the Loop Line
-
-
 
                         ##########
                         # The last thing of the layer:
@@ -1610,6 +1711,7 @@ class BrickLayersProcessor:
                             # If the gcode was using absolute extrusion, insert an M82 to return to Absolute Extrusion
                             buffer.append(from_gcode("M82 ; BRICK: Return to Absolute Extrusion\n"))
                             # Resets the correct absolute extrusion register for the next feature:
+
                             buffer.append(from_gcode(f"G92 E{myline.previous.e} ; BRICK: Resets the Extruder absolute position\n"))
                         ##########
 
@@ -1633,8 +1735,6 @@ class BrickLayersProcessor:
             buffer.append(from_gcode(f"G1 F{int(deffered_line.previous.f)} ; BRICK: Feed Rate\n")) # Simple Feed
 
             # TODO: Eliminate double-travels, passing the "buffer_lines" through optimization... EDIT: maybe it is not really necessary...
-
-
 
     def process_gcode(self, gcode_stream):
         """
@@ -1698,8 +1798,6 @@ class BrickLayersProcessor:
         #READING ONE LINE AT A TIME FROM A GENERATOR (the input)
         for line_number, line in enumerate(gcode_stream, start=1):
             bytes_received += len(line.encode("utf-8")) 
-
-
             #
             #   Settings header:
             #
@@ -1722,17 +1820,11 @@ class BrickLayersProcessor:
 
             myline = from_gcode(line) # Data Structure containing the GCODE ("content") of the current line
             myline.object = feature.current_object
-
-
             if feature.layer == start_at_layer:
                 extrusion_multiplier = first_layer_multiplier
             else:
                 extrusion_multiplier = extrusion_global_multiplier
-
-
             #logger.info(f"IP: {feature.internal_perimeter}, JL: {feature.justleft_internal_perimeter} - Line: {line_number}, gcode:{line}")
-
-
 
             # Detecting Speeds from the file:
             if detect_speeds == True: # it must begin as True - there is no default speeds (override down). It changes to False once speeds are detected
@@ -1748,8 +1840,6 @@ class BrickLayersProcessor:
                     #simulator.retraction_length = 1.0 #mm
                     #simulator.detraction_speed = 1800.0 #mm/sec
                     logger.debug(f"\n\n travel_speed: {simulator.travel_speed}\n wipe_speed: {simulator.wipe_speed}\n retraction_speed: {simulator.retraction_speed}\n detraction_speed: {simulator.detraction_speed}\n retraction_length: {simulator.retraction_length}\n\n")
-
-
             if layer_changed_during_internal_perimeter and simulator.is_extruding and simulator.is_moving:
                 # Hacking the weird situation where an internal perimeter began before a layer change 
                 # and just continues after that, without any indication of ;TYPE:inner_wall
@@ -1758,12 +1848,8 @@ class BrickLayersProcessor:
                 # https://github.com/SoftFever/OrcaSlicer/issues/884
                 feature.internal_perimeter = True
                 layer_changed_during_internal_perimeter = False #Resets
-
-
             # Logging each line in case of extreme debugging:
             #logger.info(f"Line: {line_number}, gcode:{line}")
-
-
             #
             #   Captures all the GCode lines for an "Internal Perimeter"
             #   storing every line on a data structure tha allows reordering
@@ -1785,8 +1871,6 @@ class BrickLayersProcessor:
                     if myline.gcode.startswith(("SET_VELOCITY_LIMIT ", "M204 ")):
                         special_accel_command = myline # saves for later
                         continue  # skips this line
-
-
                     if not knife_activated and (feature.wiping or simulator.retracted < 0 or simulator.just_stopped_extruding):
                         knife_activated = True
                     elif knife_activated and simulator.is_extruding and simulator.is_moving:
@@ -1810,20 +1894,14 @@ class BrickLayersProcessor:
                             group_perimeter.append(group_loop)
                     elif not knife_activated:
                         group_loop.append(myline)
-
-
                 else: # When it layers to be ignored:
                     # This Perimiter is part of a Layer that should NOT be modified. Just append:
                     if myline is not None:
                         buffer_lines.append(myline)
 
-
-
             # OrcaSlicer Layer-Change while not 'nesting' Internal Perimeters problem
             if feature.layer_change and feature.current_type=="internal_perimeter" and len(deffered_perimeters) > 0:
                 layer_changed_during_internal_perimeter = True
-
-
 
             #
             # Processing Last Buffered Perimeter:
@@ -1906,8 +1984,6 @@ class BrickLayersProcessor:
                                 if is_first_loop and is_first_line and not kept_line.current.relative_extrusion:
                                     # If the gcode was using absolute extrusion, insert an M83 for Relative Extrusion
                                     buffer_lines.append(from_gcode("M83 ; BRICK: Change to Relative Extrusion\n"))
-
-
                                 if is_first_line:
                                     # Creates a Movement to reposition the head in the correct initial position:
                                     if previous_loop is not None:
@@ -1920,14 +1996,10 @@ class BrickLayersProcessor:
                                         buffer_lines.extend(self.travel_to(kept_line.previous, simulator, feature, None, kept_line.previous, feature.z))
                                     # Enforce the Original Feed Rate of the Loop:
                                     buffer_lines.append(from_gcode(f"G1 F{int(kept_line.previous.f)} ; BRICK: Feed Rate\n"))
-
-
                                 
                                 # Here the actual internal perimeter line is added, with a calculated multiplier:
                                 calculated_line = BrickLayersProcessor.new_line_from_multiplier(kept_line, extrusion_multiplier)
                                 buffer_lines.append(calculated_line)
-
-
 
                             previous_loop = kept_loop
                         
@@ -1937,15 +2009,12 @@ class BrickLayersProcessor:
                             # If the gcode was using absolute extrusion, insert an M82 to return to Absolute Extrusion
                             buffer_lines.append(from_gcode("M82 ; BRICK: Return to Absolute Extrusion\n"))
                             # Resets the correct absolute extrusion register for the next feature:
+
                             buffer_lines.append(from_gcode(f"G92 E{myline.previous.e} ; BRICK: Resets the Extruder absolute position\n"))
                         self.last_internalperimeter_state = calculated_line.current
                         #if  myline.previous.width != kept_line.current.width:
                         buffer_lines.append(from_gcode(f"{simulator.const_width}{myline.previous.width}\n"))   # For the Preview
                         buffer_lines.append(from_gcode(f"{feature.const_layer_height}{feature.height:.2f}\n")) # For the Preview
-
-
-
-
                         # Clear the structure for deffered perimeters, ready for the next Perimeter:
                         kept_loops.clear() # Just to be sure, clear at the end
 
@@ -1959,8 +2028,6 @@ class BrickLayersProcessor:
                     # Centauri Carbon, FLSUN, BambuLab... have special commands that must be preserved before ;TYPE: External perimeter
                     buffer_lines.append(special_accel_command)
                     special_accel_command = None
-
-
             #
             #   When it reaches a "Layer Change" Gcode:
             #   (or the "Custom" close to the end of the file, after evething was alrady 'printed')
@@ -2032,8 +2099,6 @@ class BrickLayersProcessor:
 
             # After every line simulation, keeps a copy as "previous" state:
             previous_state = current_state
-
-
         if verbosity == 1 or verbosity == 2:
             self.update_progress(bytes_received, "", line_number, feature.layer)
         if verbosity == 3:
@@ -2049,8 +2114,6 @@ class BrickLayersProcessor:
         buffer_lines.clear()
 
         #logger.debug("Finished.")
-
-
 # I might ditch this to using Python's Logger for errors on a separate file...
 def error_log(message, details):
     import os
@@ -2076,8 +2139,6 @@ def error_log(message, details):
         f.write(f"   OS: {os_info}\n\n")
         f.write(details)
 
-
-
 def main():
     import argparse
     import tempfile
@@ -2086,8 +2147,6 @@ def main():
     import os
     import sys
     import time
-
-
     def human_readable_size(size_bytes):
         """Converts bytes to a human-readable format (e.g., 4.2MB, 670kB)."""
         units = ["B", "kB", "MB", "GB", "TB"]
@@ -2097,8 +2156,6 @@ def main():
                 return f"{size:.1f}{unit}"
             size /= 1024
         return f"{size:.1f}PB"  # Edge case for extremely large sizes
-
-
     #
     #   Displaying Progress in the Terminal, for CLI Usage:
     #
@@ -2164,14 +2221,10 @@ def main():
 
         previous_progress = progress
         sys.stdout.flush()
-
-
     def update_progress_print(progress_data: dict):
         """Demonstration of getting the progress without changing the processor"""
         global input_file_size
         print(int(progress_data["bytesprocessed"] / input_file_size * 100))
-
-
     class ErrorLoggingArgumentParser(argparse.ArgumentParser):
         def error(self, message):
             sys.stderr.write(f"\n💥 BrickLayers error: {message}\n\n")
@@ -2194,8 +2247,6 @@ def main():
         for start, end in ranges:
             expanded.update(range(start, end + 1))  # Include both start and end
         return expanded
-
-
     parser = ErrorLoggingArgumentParser(
         description=f"""\
 BrickLayers by Geek Detour  ({__version__})
@@ -2274,8 +2325,6 @@ Argument names are case-insensitive, so:
 
     # Create a case-insensitive argument dictionary (keys are lowercase, values stay unchanged)
     args_dict = {k.lower(): v for k, v in vars(args).items()}  # Preserve user-provided values
-
-
     if not args_dict["nologging"]:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         log_file_path = os.path.join(script_dir, "bricklayers_log.txt")
@@ -2285,8 +2334,6 @@ Argument names are case-insensitive, so:
             level=logging.DEBUG,
             format="%(asctime)s - %(message)s"
         )
-
-
     error_marker = "❌ Error: " if sys.stderr.encoding.lower() == "utf-8" else "[ERROR] "
 
     def gcode_opener(path, flags):
@@ -2297,12 +2344,8 @@ Argument names are case-insensitive, so:
             error_log("Binary G-code file", path)
             sys.exit(1)  # Exit immediately
         return os.open(path, flags)  # Open the file descriptor only if valid
-
-
     # Only process the file if Brick Layers if enabled
     if args_dict["enabled"] > 0:
-
-
         input_file = args_dict["input_file"]
 
         # Detect if the input file is in a temp directory (Windows 11 adjusted)
@@ -2368,8 +2411,6 @@ Argument names are case-insensitive, so:
         if final_output_file is None:
             print(f"{error_marker} Output file could not be determined! Check your arguments.", file=sys.stderr)
             sys.exit(1)
-
-
         if is_uploading:
             verbosity = 0
         else:
@@ -2377,8 +2418,6 @@ Argument names are case-insensitive, so:
 
         if verbosity == 1:
             print(input_file)
-
-
         # Setting up the BrickProcessor:
         processor = BrickLayersProcessor(
             extrusion_global_multiplier=args_dict["extrusionmultiplier"],
@@ -2389,8 +2428,6 @@ Argument names are case-insensitive, so:
         processor.experimental_arcflick = False
         processor.set_progress_callback(update_progress)  # Full-fledged terminal progress indicator
         #processor.set_progress_callback(update_progress_print) # Super simple progress-indicator example
-
-
         # Detect interpreter
         python_imp = platform.python_implementation()
         python_ver = platform.python_version()
@@ -2500,8 +2537,6 @@ Argument names are case-insensitive, so:
             else:
                 print("ERROR: Could not output the file after multiple attempts.")
                 sys.exit(1)  # Exit with error if all retries fail
-
-
         if verbosity > 0:
 
             end_time = time.time()
@@ -2524,12 +2559,8 @@ Argument names are case-insensitive, so:
 
             print(f"Execution time: {elapsed_time:.2f} seconds")
             print("\n")
-
-
     else:
         print("⚠️ Brick Layers is disabled (-enabled 0). No modifications applied.")
-
-
 if __name__ == "__main__":
     import sys
 

@@ -1,5 +1,24 @@
-# Bricklayers
+# Bricklayers (Patched Fork)
 Interlocking Layers Post-Processing Script for PrusaSlicer, OrcaSlicer, and BambuStudio
+
+This fork adds fixes and features on top of [GeekDetour/BrickLayers](https://github.com/GeekDetour/BrickLayers).
+
+## Added Features
+
+### G2/G3 Arc Support
+Arc fitting can now be left **enabled** in your slicer. This fork properly handles G2/G3 arc commands:
+- **Bounding box:** Computes true arc bounding box via cardinal angle crossing detection (not just endpoints)
+- **Wipe path:** Arc-aware distance calculation and endpoint interpolation for correct wipe retracing
+
+### Feature Branches for Upstream PRs
+
+| Branch | Feature |
+|---|---|
+| [`arc-support`](../../tree/arc-support) | G2/G3 arc bounding box and wipe path |
+
+---
+
+## Original README
 
 ## Video about this script:
 [![Brick Layers for everybody](https://img.youtube.com/vi/qqJOa46OTTs/maxresdefault.jpg)](https://www.youtube.com/watch?v=qqJOa46OTTs)
@@ -55,8 +74,8 @@ In "Quality", "Walls printing order" be sure you select **"Inner/Outer"** - this
 In **Prusa Slicer** you can choose **Classic** or **Arachne**, both work equaly fine. 
 But on **Orca Slicer** and **Bambu Studio** forks, Arachne sometimes creates orphaned loops that will turn into minor glitches in Brick Layers (I cannot fix, so far) - so I recommend **'Classic'**.
 
-### **Disable Arc fitting** (for now)
-The plan, from the beginning, is to support ARC. But it's not completely done yet - it needs an algorithm to calculate Bounding Boxes of the exact area an arc of any arbitrary angle occupies, ideally without making the script much slower.
+### **Arc fitting** (now supported in this fork)
+This fork adds full G2/G3 arc support — you can leave arc fitting **enabled** in your slicer settings.
 
 ### **Binary G-code** on Prusa Slicer:
 You must **disable** `"Supports binary G-code"` in **Printers → General → Firmware** (Expert Mode)
