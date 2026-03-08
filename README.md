@@ -10,6 +10,11 @@ Arc fitting can now be left **enabled** in your slicer. This fork properly handl
 - **Bounding box:** Computes true arc bounding box via cardinal angle crossing detection (not just endpoints)
 - **Wipe path:** Arc-aware distance calculation and endpoint interpolation for correct wipe retracing
 
+### Bambu Studio Wipe Fix
+Fixes missing chunks in Bambu Studio's G-code preview and improves print quality at brick layer transitions. Prevents Travel Fix Up injection inside wipe blocks.
+
+A [patched BambuStudio fork](https://github.com/adele-with-a-b/BambuStudio/tree/post-process-preview) is available that re-parses G-code after post-processing scripts run, showing the BrickLayers toolpath directly in the preview without manual re-import.
+
 ### Absolute Extrusion Fix (Issue #17)
 Fixes G92 E reset using wrong value after deferred perimeters in absolute extrusion mode. The reset now uses the E value from before the deferred block, since the firmware E register did not advance during relative extrusion replay.
 
@@ -18,6 +23,7 @@ Fixes G92 E reset using wrong value after deferred perimeters in absolute extrus
 | Branch | Feature |
 |---|---|
 | [`arc-support`](../../tree/arc-support) | G2/G3 arc bounding box and wipe path |
+| [`wipe-fix`](../../tree/wipe-fix) | Prevent Travel Fix Up injection inside wipe blocks |
 | [`absolute-extrusion-fix`](../../tree/absolute-extrusion-fix) | G92 E reset fix for absolute extrusion mode |
 
 ---
