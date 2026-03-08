@@ -10,11 +10,15 @@ Arc fitting can now be left **enabled** in your slicer. This fork properly handl
 - **Bounding box:** Computes true arc bounding box via cardinal angle crossing detection (not just endpoints)
 - **Wipe path:** Arc-aware distance calculation and endpoint interpolation for correct wipe retracing
 
+### Absolute Extrusion Fix (Issue #17)
+Fixes G92 E reset using wrong value after deferred perimeters in absolute extrusion mode. The reset now uses the E value from before the deferred block, since the firmware E register did not advance during relative extrusion replay.
+
 ### Feature Branches for Upstream PRs
 
 | Branch | Feature |
 |---|---|
 | [`arc-support`](../../tree/arc-support) | G2/G3 arc bounding box and wipe path |
+| [`absolute-extrusion-fix`](../../tree/absolute-extrusion-fix) | G92 E reset fix for absolute extrusion mode |
 
 ---
 
